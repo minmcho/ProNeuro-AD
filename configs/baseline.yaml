@@ -1,0 +1,22 @@
+# Stage 1 baseline: FreeSurfer volumes in ADNIMERGE -> amyloid + MCI conversion
+data:
+  adnimerge_csv: data/raw/ADNIMERGE.csv
+
+features:
+  # Regional volumes are normalized by intracranial volume (ICV)
+  volumes: [Hippocampus, Entorhinal, Fusiform, MidTemp, Ventricles, WholeBrain]
+  covariates: [AGE, PTEDUCAT, PTGENDER, APOE4]
+
+amyloid:
+  # Positivity from florbetapir (AV45) SUVR; common ADNI cutoff, verify for your analysis
+  av45_cutoff: 1.11
+
+conversion:
+  baseline_dx: MCI
+  horizon_months: 60
+
+eval:
+  n_splits: 5
+  seed: 42
+
+output_dir: outputs/baseline

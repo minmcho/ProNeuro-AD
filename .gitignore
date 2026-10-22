@@ -1,0 +1,33 @@
+# --- Patient data: never commit ---
+data/
+outputs/
+*.nii
+*.nii.gz
+*.mgz
+*.dcm
+*.h5
+*.hdf5
+*.npz
+*.pt
+*.pth
+*.ckpt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+
+# --- Tools & OS ---
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+mlruns/
+wandb/
