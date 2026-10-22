@@ -3,8 +3,8 @@
 import numpy as np
 import pandas as pd
 
-from brainprog.data.adnimerge import amyloid_labels, baseline_features, conversion_labels
-from brainprog.models.baseline import amyloid_cv, conversion_cv
+from proneuro.data.adnimerge import amyloid_labels, baseline_features, conversion_labels
+from proneuro.models.baseline import amyloid_cv, conversion_cv
 
 VOLS = ["Hippocampus", "Entorhinal", "Fusiform", "MidTemp", "Ventricles", "WholeBrain"]
 COVS = ["AGE", "PTEDUCAT", "PTGENDER", "APOE4"]

@@ -1,4 +1,4 @@
-# mri-prog (placeholder name)
+# ProNeuro-AD
 
 MRI-based prognostic AI for Alzheimer's disease — research prototype.
 
@@ -26,7 +26,7 @@ data/raw/           ADNI / OASIS downloads (never committed)
 data/processed/     derived tables & images (never committed)
 docs/               data access, model card, notes
 scripts/            command-line entry points
-src/brainprog/      the Python package
+src/proneuro/      the Python package
   data/             loading & label building
   preprocessing/    MRI preprocessing wrappers (FastSurfer)
   features/         feature extraction
@@ -67,4 +67,4 @@ For an RTX 50-series GPU, install a PyTorch build with CUDA 12.8 or later
 ## Renaming the project
 
 Rename the folder and GitHub repo freely. To rename the Python package too,
-change `brainprog` in `pyproject.toml`, the `src/brainprog/` folder, and imports.
+change `proneuro` in `pyproject.toml`, the `src/proneuro/` folder, and imports.

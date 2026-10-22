@@ -4,14 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from brainprog.config import load_config
-from brainprog.data.adnimerge import (
+from proneuro.config import load_config
+from proneuro.data.adnimerge import (
     amyloid_labels,
     baseline_features,
     conversion_labels,
     load_adnimerge,
 )
-from brainprog.models.baseline import amyloid_cv, conversion_cv
+from proneuro.models.baseline import amyloid_cv, conversion_cv
 
 
 def main() -> None:
