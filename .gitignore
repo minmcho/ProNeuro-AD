@@ -1,6 +1,6 @@
 # --- Patient data: never commit ---
-data/
-outputs/
+/data/
+/outputs/
 *.nii
 *.nii.gz
 *.mgz
