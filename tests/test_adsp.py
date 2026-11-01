@@ -61,6 +61,7 @@ def test_run_baseline_comparison(tmp_path: Path):
     cfg = {"matching": {"dx_window_years": 0.5, "pet_window_years": 1.0},
            "conversion": {"horizon_months": 60}, "eval": {"n_splits": 3, "seed": 0}}
     res = mod.run_adsp(cfg, str(tmp_path))
-    assert set(res["comparison"]) == {"full (MRI + age, sex, education, APOE4)", "MRI only",
-                                      "MRI + age", "no MRI (age, sex, education, APOE4)"}
+    assert {"MRI only", "MRI all regions (ridge)", "MRI all regions (boosting)"} <= set(
+        res["comparison"])
+    assert res["n_region_features"] > 10
     assert res["comparison"]["MRI only"]["amyloid_auc"] > 0.6

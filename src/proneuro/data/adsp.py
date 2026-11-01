@@ -36,10 +36,12 @@ def _read(folder: Path, name: str, **kw) -> pd.DataFrame:
 
 
 def load_tables(folder: str | Path) -> dict[str, pd.DataFrame]:
-    mri_cols = ["RID", "PHC_Age_T1", ICV_COLUMN] + sum(VOLUME_COLUMNS.values(), [])
+    def keep(c: str) -> bool:
+        return c in ("RID", "PHC_Age_T1") or c.endswith("_combat")
+
     return {
         "dx": _read(folder, "ADSP_PHC_DEMODX"),
-        "mri": _read(folder, "ADSP_PHC_T1_FS", usecols=mri_cols),
+        "mri": _read(folder, "ADSP_PHC_T1_FS", usecols=keep),
         "amy": _read(folder, "ADSP_PHC_PET_Amyloid_Simple"),
         "apoe": _read(folder, "APOERES"),
     }
@@ -60,6 +62,26 @@ def baseline_mri(mri: pd.DataFrame) -> pd.DataFrame:
     for name, cols in VOLUME_COLUMNS.items():
         out[f"{name}_icv"] = bl[cols].sum(axis=1, min_count=len(cols)) / bl[ICV_COLUMN]
     return out
+
+
+def all_regions(mri: pd.DataFrame) -> pd.DataFrame:
+    """All ~190 FreeSurfer measures at baseline, prefixed 'fs_'.
+
+    Cortical thickness and ratio-to-eTIV measures are kept as is;
+    volumes and areas are divided by intracranial volume.
+    """
+    mri = mri.dropna(subset=["PHC_Age_T1", ICV_COLUMN]).sort_values(["RID", "PHC_Age_T1"])
+    bl = mri.drop_duplicates("RID").set_index("RID")
+    out = {}
+    for c in bl.columns:
+        if not c.endswith("_combat") or c == ICV_COLUMN:
+            continue
+        name = "fs_" + c[: -len("_combat")]
+        if "thickness" in c or "to_eTIV" in c:
+            out[name] = bl[c]
+        else:
+            out[name] = bl[c] / bl[ICV_COLUMN]
+    return pd.DataFrame(out, index=bl.index)
 
 
 def _nearest(events: pd.DataFrame, age_col: str, ref_age: pd.Series, window: float) -> pd.DataFrame:
@@ -107,5 +129,7 @@ def build_dataset(folder: str | Path, dx_window: float = 0.5, pet_window: float 
             rows.append({"RID": rid, "duration": float(duration), "event": int(event)})
     surv = pd.DataFrame(rows, columns=["RID", "duration", "event"]).set_index("RID")
 
-    return {"X": X.replace([np.inf, -np.inf], np.nan), "baseline_dx": baseline_dx,
+    regions = all_regions(t["mri"]).reindex(X.index)
+    return {"X": X.replace([np.inf, -np.inf], np.nan),
+            "regions": regions.replace([np.inf, -np.inf], np.nan), "baseline_dx": baseline_dx,
             "amyloid": amyloid, "conversion": surv}

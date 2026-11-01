@@ -23,22 +23,31 @@ def run_adsp(cfg: dict, data_dir: str | None) -> dict:
     counts = d["baseline_dx"].map({1: "CN", 2: "MCI", 3: "AD", 4: "other_dementia",
                                    5: "other"}).value_counts().to_dict()
     mri = [c for c in X.columns if c.endswith("_icv")]
+    demo = ["age", "female", "education", "apoe4"]
+    X = X.join(d["regions"])
+    regions = list(d["regions"].columns)
+    # (features, model): "linear" = plain, "ridge" = regularized, "boost" = gradient boosting
     feature_sets = {
-        "full (MRI + age, sex, education, APOE4)": list(X.columns),
-        "MRI only": mri,
-        "MRI + age": mri + ["age"],
-        "no MRI (age, sex, education, APOE4)": ["age", "female", "education", "apoe4"],
+        "full (MRI + age, sex, education, APOE4)": (mri + demo, "linear"),
+        "MRI only": (mri, "linear"),
+        "MRI + age": (mri + ["age"], "linear"),
+        "no MRI (age, sex, education, APOE4)": (demo, "linear"),
+        "MRI all regions (ridge)": (regions, "ridge"),
+        "MRI all regions (boosting)": (regions, "boost"),
+        "MRI all regions + demographics (ridge)": (regions + demo, "ridge"),
+        "MRI all regions + demographics (boosting)": (regions + demo, "boost"),
     }
     surv_ids = X.index.isin(d["conversion"].index)
     comparison = {}
-    for name, cols in feature_sets.items():
-        amy = amyloid_cv(X[cols], d["amyloid"], k, seed)
-        conv = conversion_cv(X.loc[surv_ids, cols], d["conversion"], k, seed)
+    for name, (cols, model) in feature_sets.items():
+        amy = amyloid_cv(X[cols], d["amyloid"], k, seed, model)
+        conv = conversion_cv(X.loc[surv_ids, cols], d["conversion"], k, seed, model)
         comparison[name] = {"amyloid_auc": round(amy["auc_mean"], 3),
                             "amyloid_auc_sd": round(amy["auc_std"], 3),
                             "conversion_cindex": round(conv["cindex_mean"], 3),
                             "conversion_cindex_sd": round(conv["cindex_std"], 3)}
     return {
+        "n_region_features": len(regions),
         "participants_with_baseline_mri": int(len(X)),
         "baseline_diagnosis": counts,
         "amyloid_n": amy["n"], "amyloid_positive_rate": round(amy["positive_rate"], 3),
