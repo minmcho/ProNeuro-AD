@@ -22,13 +22,28 @@ def run_adsp(cfg: dict, data_dir: str | None) -> dict:
     X, k, seed = d["X"], cfg["eval"]["n_splits"], cfg["eval"]["seed"]
     counts = d["baseline_dx"].map({1: "CN", 2: "MCI", 3: "AD", 4: "other_dementia",
                                    5: "other"}).value_counts().to_dict()
+    mri = [c for c in X.columns if c.endswith("_icv")]
+    feature_sets = {
+        "full (MRI + age, sex, education, APOE4)": list(X.columns),
+        "MRI only": mri,
+        "MRI + age": mri + ["age"],
+        "no MRI (age, sex, education, APOE4)": ["age", "female", "education", "apoe4"],
+    }
+    surv_ids = X.index.isin(d["conversion"].index)
+    comparison = {}
+    for name, cols in feature_sets.items():
+        amy = amyloid_cv(X[cols], d["amyloid"], k, seed)
+        conv = conversion_cv(X.loc[surv_ids, cols], d["conversion"], k, seed)
+        comparison[name] = {"amyloid_auc": round(amy["auc_mean"], 3),
+                            "amyloid_auc_sd": round(amy["auc_std"], 3),
+                            "conversion_cindex": round(conv["cindex_mean"], 3),
+                            "conversion_cindex_sd": round(conv["cindex_std"], 3)}
     return {
         "participants_with_baseline_mri": int(len(X)),
         "baseline_diagnosis": counts,
-        "features": list(X.columns),
-        "amyloid": amyloid_cv(X, d["amyloid"], k, seed),
-        "conversion": conversion_cv(X.loc[X.index.isin(d["conversion"].index)],
-                                    d["conversion"], k, seed),
+        "amyloid_n": amy["n"], "amyloid_positive_rate": round(amy["positive_rate"], 3),
+        "conversion_n": conv["n"], "conversion_events": conv["events"],
+        "comparison": comparison,
     }
 
 

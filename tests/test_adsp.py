@@ -46,3 +46,21 @@ def test_build_dataset_and_models(tmp_path: Path):
     assert len(surv) > 50 and surv["event"].sum() > 5 and (surv["duration"] > 0).all()
     assert amyloid_cv(X, d["amyloid"], n_splits=3)["auc_mean"] > 0.6
     assert conversion_cv(X.loc[X.index.isin(surv.index)], surv, n_splits=3)["cindex_mean"] > 0.6
+
+
+def test_run_baseline_comparison(tmp_path: Path):
+    import importlib.util
+    import sys
+
+    write_synthetic(tmp_path)
+    spec = importlib.util.spec_from_file_location(
+        "run_baseline", Path(__file__).parents[1] / "scripts" / "run_baseline.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["run_baseline"] = mod
+    spec.loader.exec_module(mod)
+    cfg = {"matching": {"dx_window_years": 0.5, "pet_window_years": 1.0},
+           "conversion": {"horizon_months": 60}, "eval": {"n_splits": 3, "seed": 0}}
+    res = mod.run_adsp(cfg, str(tmp_path))
+    assert set(res["comparison"]) == {"full (MRI + age, sex, education, APOE4)", "MRI only",
+                                      "MRI + age", "no MRI (age, sex, education, APOE4)"}
+    assert res["comparison"]["MRI only"]["amyloid_auc"] > 0.6
