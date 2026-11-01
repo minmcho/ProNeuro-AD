@@ -1,0 +1,19 @@
+# Stage 1 baseline from ADSP-PHC harmonized ADNI tables (ADNI1 through ADNI4).
+# Export the CSVs from the ADNIMERGE2 R package (see docs/DATA_ACCESS.md).
+source: adsp
+
+data:
+  adsp_dir: data/raw/ADNI_tables
+
+matching:
+  dx_window_years: 0.5     # diagnosis visit must be within 6 months of baseline MRI
+  pet_window_years: 1.0    # amyloid PET must be within 1 year of baseline MRI
+
+conversion:
+  horizon_months: 60
+
+eval:
+  n_splits: 5
+  seed: 42
+
+output_dir: outputs/baseline_adsp

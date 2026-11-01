@@ -7,6 +7,13 @@
 - Start with the tabular file `ADNIMERGE.csv` (study data) for Stage 1.
 - For Stage 2+, download baseline 3D T1-weighted MRI (MPRAGE / IR-SPGR).
 
+## ADSP-PHC tables (recommended for Stage 1)
+The single ADNIMERGE table is being phased out. Instead download the
+**ADNIMERGE2** R package (`ADNIMERGE2.tar.gz`) from Study Data, then export
+these datasets to CSV into `data/raw/ADNI_tables/`:
+`ADSP_PHC_DEMODX`, `ADSP_PHC_T1_FS`, `ADSP_PHC_PET_Amyloid_Simple`, `APOERES`.
+Run: `python scripts/run_baseline.py --config configs/baseline_adsp.yaml`
+
 ## OASIS-3 (external validation)
 - https://sites.wustl.edu/oasisbrains/ — separate application and terms.
 
