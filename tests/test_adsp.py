@@ -65,3 +65,28 @@ def test_run_baseline_comparison(tmp_path: Path):
         res["comparison"])
     assert res["n_region_features"] > 10
     assert res["comparison"]["MRI only"]["amyloid_auc"] > 0.6
+
+
+def test_select_baseline_mri(tmp_path: Path):
+    import importlib.util
+    import sys
+
+    write_synthetic(tmp_path)
+    fs = pd.read_csv(tmp_path / "ADSP_PHC_T1_FS.csv")
+    fs["PTID"] = "S" + fs["RID"].astype(str)
+    fs["PHC_SCANDATE"] = "2020-01-01"
+    fs.to_csv(tmp_path / "ADSP_PHC_T1_FS.csv", index=False)
+    scans = pd.DataFrame({
+        "subject_id": list(fs["PTID"]) * 2, "image_date": "2020-01-01",
+        "image_id": list(range(1000, 1000 + len(fs))) + list(range(5000, 5000 + len(fs))),
+        "series_type": "T1w", "acquisition_type": ["3D"] * len(fs) + ["2D"] * len(fs),
+        "series_description": "MPRAGE", "acceleration": None,
+        "magnetic_field_strength": 3.0, "scanner_manufacturer": "X", "image_visit": "bl"})
+    spec = importlib.util.spec_from_file_location(
+        "select_baseline_mri", Path(__file__).parents[1] / "scripts" / "select_baseline_mri.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["select_baseline_mri"] = mod
+    spec.loader.exec_module(mod)
+    sel = mod.select(scans, tmp_path)
+    assert len(sel) == 240 and (sel["image_id"] < 5000).all()  # 3D chosen over 2D
+    assert set(sel["baseline_dx"]) <= {"CN", "MCI", "AD"}
