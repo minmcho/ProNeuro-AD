@@ -41,6 +41,13 @@ def to_nifti(image_dir: Path, nifti_dir: Path) -> Path:
     return out
 
 
+def docker_running() -> bool:
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--download-dir", required=True)
@@ -52,6 +59,9 @@ def main() -> None:
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
+    if not docker_running():
+        sys.exit("Docker is not running. Open Docker Desktop, wait for 'Engine running', "
+                 "then run this again.")
     sel = pd.read_csv(args.selection)
     dirs = find_image_dirs(Path(args.download_dir))
     todo = sel[sel["image_id"].isin(dirs)]
