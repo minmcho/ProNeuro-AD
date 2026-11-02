@@ -8,7 +8,8 @@ from proneuro.preprocessing.fastsurfer import fastsurfer_command
 def test_gpu_seg_only_command(tmp_path: Path):
     t1 = tmp_path / "in" / "sub-01_T1w.nii.gz"
     cmd = fastsurfer_command(t1, "sub-01", tmp_path / "out")
-    assert cmd[:5] == ["docker", "run", "--rm", "--gpus", "all"]
+    assert cmd[:3] == ["docker", "run", "--rm"] and "--user" in cmd
+    assert "--gpus" in cmd and cmd[cmd.index("--gpus") + 1] == "all"
     assert "/data/sub-01_T1w.nii.gz" in cmd
     assert "--seg_only" in cmd and "--fs_license" not in cmd
 

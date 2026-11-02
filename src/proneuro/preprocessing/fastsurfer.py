@@ -4,6 +4,7 @@ Segmentation only (--seg_only) does not need a FreeSurfer license.
 Surface reconstruction (later) does; pass `license_file` then.
 """
 
+import os
 from pathlib import Path
 
 DEFAULT_IMAGE = "deepmi/fastsurfer:latest"
@@ -18,10 +19,18 @@ def fastsurfer_command(
     use_gpu: bool = True,
     license_file: Path | None = None,
     seg_only: bool = True,
+    user: str | None = None,
 ) -> list[str]:
-    """Build the `docker run` command. Input folder -> /data, output folder -> /output."""
+    """Build the `docker run` command. Input folder -> /data, output folder -> /output.
+
+    FastSurfer must not run as its default container user. On Linux/macOS we pass the
+    host user (uid:gid); on Windows (no uid) Docker Desktop maps file permissions
+    itself, so a regular non-root id works.
+    """
     t1, out_dir = Path(t1).resolve(), Path(out_dir).resolve()
-    cmd = ["docker", "run", "--rm"]
+    if user is None:
+        user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "1000:1000"
+    cmd = ["docker", "run", "--rm", "--user", user]
     if use_gpu:
         cmd += ["--gpus", "all"]
     cmd += ["-v", f"{t1.parent}:/data:ro", "-v", f"{out_dir}:/output"]
