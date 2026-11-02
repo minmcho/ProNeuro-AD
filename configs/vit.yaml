@@ -1,0 +1,38 @@
+# Stage 3: tri-planar parallel ViT fine-tuning (sized for a 12 GB laptop GPU)
+data:
+  adsp_dir: data/raw/ADNI_tables
+  volume_dir: data/processed/volumes     # {RID}.npy from scripts/prepare_volumes.py
+
+matching:
+  dx_window_years: 0.5
+  pet_window_years: 1.0
+
+horizon_months: 60
+n_splits: 5
+seed: 42
+
+model:
+  backbone: vit_small_patch16_224   # ImageNet-pretrained (timm); try deit_small_patch16_224 or vit_base_patch16_224
+  pretrained: true
+  shared_backbone: false            # false = 3 separate parallel branches; true = one shared ViT (less memory)
+  slices_per_plane: 8               # 2.5D slices per plane (3 neighbouring slices -> RGB)
+  img_size: 224
+  fusion_layers: 2
+  dropout: 0.1
+  time_bins: 5                      # 12-month bins over the 60-month horizon
+  grad_checkpointing: true          # saves GPU memory at some speed cost
+
+train:
+  epochs: 30
+  patience: 6                       # early stopping on validation (mean of AUC and C-index)
+  batch_size: 4
+  accumulate: 4                     # effective batch 16
+  lr_backbone: 2.0e-5               # gentle fine-tuning of the pretrained ViT
+  lr_head: 2.0e-4
+  weight_decay: 0.05
+  amyloid_weight: 1.0
+  val_fraction: 0.1
+  amp: true                         # mixed precision on GPU
+  num_workers: 4
+
+output_dir: outputs/vit

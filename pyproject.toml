@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5"]
-deep = ["torch>=2.7", "monai>=1.4", "nibabel>=5.2"]
+deep = ["torch>=2.7", "timm>=1.0", "nibabel>=5.2", "dicom2nifti>=2.4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

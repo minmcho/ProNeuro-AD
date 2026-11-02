@@ -12,10 +12,10 @@ MRI-based prognostic AI for Alzheimer's disease — research prototype.
 
 | Stage | What | Status |
 |---|---|---|
-| 0 | Repo, environment, ADNI data access | in progress |
-| 1 | Baseline: FreeSurfer volumes from ADNIMERGE → amyloid classifier + conversion survival model | scaffolded |
-| 2 | Own preprocessing: FastSurfer on raw T1 MRI → regional features | planned |
-| 3 | Deep model: 3D CNN on preprocessed MRI (MONAI / PyTorch) | planned |
+| 0 | Repo, environment, ADNI data access | done |
+| 1 | Baseline: FreeSurfer measures (ADSP-PHC tables) → amyloid classifier + conversion survival model | done — MRI-only AUC 0.75, C-index 0.75 |
+| 2 | FastSurfer on downloaded baseline T1 MRIs → normalized brain volumes | code ready |
+| 3 | Deep model: tri-planar parallel ViT fine-tuning (amyloid + conversion) | code ready |
 | 4 | External validation (OASIS-3, an Asian cohort), calibration, write-up | planned |
 
 ## Layout
@@ -57,6 +57,21 @@ For an RTX 50-series GPU, install a PyTorch build with CUDA 12.8 or later
    python scripts/run_baseline.py --config configs/baseline.yaml
    ```
 3. Results land in `outputs/`.
+
+## Stage 2–3: MRI → tri-planar ViT
+
+```bash
+python scripts/select_baseline_mri.py --scan-list <ADNIMERGE_Key_MRI_*.csv>   # image IDs for LONI
+python scripts/batch_fastsurfer.py --download-dir <LONI download folder>      # GPU, ~1 min/scan
+python scripts/prepare_volumes.py                                             # -> data/processed/volumes
+pip install -e ".[deep]"
+python scripts/train_vit.py --config configs/vit.yaml --folds 1               # one fold first
+python scripts/train_vit.py --config configs/vit.yaml                         # full 5-fold CV
+```
+
+The ViT has three parallel ImageNet-pretrained branches (sagittal, coronal, axial), each
+fine-tuned on 2.5D slices, fused by a small transformer, with an amyloid head and a
+discrete-time survival head. A FreeSurfer ridge baseline is trained on the same folds.
 
 ## Data rules
 
