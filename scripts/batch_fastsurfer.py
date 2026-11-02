@@ -80,16 +80,20 @@ def main() -> None:
         try:
             nii = to_nifti(dirs[int(row["image_id"])], Path(args.nifti_dir))
             cmd = fastsurfer_command(nii, rid, out, image=args.image, use_gpu=not args.cpu)
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
             if r.returncode != 0:
-                raise RuntimeError(r.stderr[-500:])
+                lines = (r.stdout + "\n" + r.stderr).strip().splitlines()
+                tail = "\n    ".join(lines[-15:]) or "(no output)"
+                raise RuntimeError(f"FastSurfer exit code {r.returncode}. Last output:\n    {tail}"
+                                   f"\n  Command: {' '.join(cmd)}")
             done += 1
             print(f"[{done + failed}/{len(todo)}] RID {rid} ok ({time.time() - t0:.0f}s)")
         except Exception as e:  # keep going; log the failure
             failed += 1
-            print(f"[{done + failed}/{len(todo)}] RID {rid} FAILED: {e}", file=sys.stderr)
-            with open(out / "failures.txt", "a") as f:
-                f.write(f"{rid}\t{row['image_id']}\t{str(e)[:300]}\n")
+            msg = f"{type(e).__name__}: {e}"
+            print(f"[{done + failed}/{len(todo)}] RID {rid} FAILED: {msg}", file=sys.stderr)
+            with open(out / "failures.txt", "a", encoding="utf-8") as f:
+                f.write(f"{rid}\t{row['image_id']}\t{msg[:2000]}\n")
     print(f"Done: {done} processed, {failed} failed")
 
 
