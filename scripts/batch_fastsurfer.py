@@ -26,19 +26,41 @@ def find_image_dirs(root: Path) -> dict[int, Path]:
     return found
 
 
+def to_3d(nii: Path, nifti_dir: Path) -> Path:
+    """FastSurfer needs one 3D image. Some ADNI T1 series hold several frames
+    (multi-echo MPRAGE or repeats); combine them by root-mean-square, the standard
+    way to merge multi-echo MPRAGE (for identical repeats it is close to the mean)."""
+    import nibabel as nib
+    import numpy as np
+
+    img = nib.load(str(nii))
+    if img.ndim == 3:
+        return nii
+    out = nifti_dir / (nii.name.replace(".nii.gz", "").replace(".nii", "") + "_3d.nii.gz")
+    if not out.exists():
+        data = np.asarray(img.dataobj, dtype=np.float32)
+        data = data.reshape(data.shape[:3] + (-1,))
+        combined = np.sqrt((data ** 2).mean(axis=3))
+        nifti_dir.mkdir(parents=True, exist_ok=True)
+        hdr = img.header.copy()
+        hdr.set_data_dtype(np.float32)
+        nib.save(nib.Nifti1Image(combined, img.affine, hdr), str(out))
+    return out
+
+
 def to_nifti(image_dir: Path, nifti_dir: Path) -> Path:
-    """Return a NIfTI for this image folder, converting DICOM if needed."""
+    """Return a single-frame 3D NIfTI for this image folder, converting DICOM if needed."""
     for pattern in ("*.nii.gz", "*.nii"):
         hits = sorted(image_dir.glob(pattern))
         if hits:
-            return hits[0]
+            return to_3d(hits[0], nifti_dir)
     out = nifti_dir / f"{image_dir.name}.nii.gz"
     if not out.exists():
         import dicom2nifti
 
         nifti_dir.mkdir(parents=True, exist_ok=True)
         dicom2nifti.dicom_series_to_nifti(str(image_dir), str(out), reorient_nifti=True)
-    return out
+    return to_3d(out, nifti_dir)
 
 
 def docker_running() -> bool:

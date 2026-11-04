@@ -19,3 +19,27 @@ def test_cpu_with_license(tmp_path: Path):
                              license_file=tmp_path / "lic" / "license.txt", seg_only=False)
     assert "--gpus" not in cmd
     assert "/fs_license/license.txt" in cmd and "--seg_only" not in cmd
+
+
+def test_multiframe_nifti_combined_to_3d(tmp_path: Path):
+    import importlib.util
+    import sys
+
+    import nibabel as nib
+    import numpy as np
+
+    spec = importlib.util.spec_from_file_location(
+        "batch_fastsurfer", Path(__file__).parents[1] / "scripts" / "batch_fastsurfer.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["batch_fastsurfer"] = mod
+    spec.loader.exec_module(mod)
+
+    four_d = tmp_path / "I1.nii.gz"
+    nib.save(nib.Nifti1Image(np.full((8, 8, 8, 3), 2.0, np.float32), np.eye(4)), str(four_d))
+    out = mod.to_3d(four_d, tmp_path / "nifti")
+    img = nib.load(str(out))
+    assert img.ndim == 3 and np.allclose(img.get_fdata(), 2.0)
+
+    three_d = tmp_path / "I2.nii.gz"
+    nib.save(nib.Nifti1Image(np.ones((8, 8, 8), np.float32), np.eye(4)), str(three_d))
+    assert mod.to_3d(three_d, tmp_path / "nifti") == three_d
