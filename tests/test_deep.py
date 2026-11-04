@@ -45,10 +45,8 @@ def test_discrete_time_loss():
         torch.tensor([[2.0] * 5, [-2.0] * 5]))[1]
 
 
-def test_cross_validate_end_to_end(tmp_path: Path):
+def _synthetic(tmp_path: Path):
     import pandas as pd
-
-    from proneuro.deep.train import cross_validate
 
     rng = np.random.default_rng(1)
     n = 40
@@ -71,6 +69,9 @@ def test_cross_validate_end_to_end(tmp_path: Path):
                                     "event": (sev[1::2] > 0).astype(int)}, index=idx[1::2]),
     }
     cfg = {"seed": 0, "n_splits": 2, "horizon_months": 60,
+           "data": {"feature_dir": str(tmp_path / "feats")},
+           "frozen": {"epochs": 5, "patience": 3, "batch_size": 8, "lr": 1e-3,
+                      "weight_decay": 0.0},
            "model": {**{k: TINY[k] for k in ("backbone", "pretrained", "img_size", "slices_per_plane",
                                             "fusion_layers", "time_bins")},
                      "shared_backbone": False, "dropout": 0.0,
@@ -78,8 +79,28 @@ def test_cross_validate_end_to_end(tmp_path: Path):
            "train": {"epochs": 2, "patience": 5, "batch_size": 4, "accumulate": 2,
                      "lr_backbone": 1e-4, "lr_head": 1e-3, "weight_decay": 0.0,
                      "amyloid_weight": 1.0, "val_fraction": 0.2, "amp": False, "num_workers": 0}}
+    return cfg, d, vol_dir
+
+
+def test_cross_validate_finetune(tmp_path: Path):
+    from proneuro.deep.train import cross_validate
+
+    cfg, d, vol_dir = _synthetic(tmp_path)
+    cfg["model"]["freeze_backbone"] = False
     summary = cross_validate(cfg, d, vol_dir, tmp_path / "out", torch.device("cpu"), folds=[1])
-    assert summary["folds_run"] == 1
+    assert summary["mode"] == "finetune" and summary["folds_run"] == 1
     assert "amyloid_auc" in summary["tri_planar_vit"]
     assert "amyloid_auc" in summary["freesurfer_ridge_same_folds"]
     assert (tmp_path / "out" / "summary.json").exists()
+
+
+def test_cross_validate_frozen(tmp_path: Path):
+    from proneuro.deep.train import cross_validate
+
+    cfg, d, vol_dir = _synthetic(tmp_path)
+    cfg["model"]["freeze_backbone"] = True
+    summary = cross_validate(cfg, d, vol_dir, tmp_path / "out", torch.device("cpu"), folds=[1])
+    assert summary["mode"] == "frozen" and summary["folds_run"] == 1
+    assert "amyloid_auc" in summary["tri_planar_vit"]
+    feats = list((tmp_path / "feats").rglob("*.npy"))
+    assert len(feats) == 40 and np.load(feats[0]).shape == (2, 3, 4, 192)

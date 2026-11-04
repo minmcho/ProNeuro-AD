@@ -7,6 +7,12 @@ embedding; the 3*K embeddings (+ plane and position embeddings) go through a
 small transformer that fuses information across planes, then two heads:
 
   amyloid_logit  -> amyloid PET positive (binary)
+
+Two training modes (configs/vit.yaml, model.freeze_backbone):
+  frozen   - the pretrained ViTs are run once per scan and their slice embeddings
+             cached; only the fusion transformer and heads are trained. Data-efficient
+             and fast: the right choice for a few hundred scans.
+  finetune - all weights trained end to end (needs thousands of scans).
   hazard_logits  -> MCI -> AD dementia conversion, discrete-time hazard per time bin
                     (works with small batches, unlike a batch-level Cox loss)
 """
@@ -66,24 +72,39 @@ class TriPlanarViT(nn.Module):
     def backbone_parameters(self):
         return self.backbones.parameters()
 
-    def forward(self, vol: torch.Tensor) -> dict[str, torch.Tensor]:
-        """vol: (B, D, H, W) normalized brain volume."""
+    @property
+    def dim(self) -> int:
+        return self.plane_emb.shape[-1]
+
+    def embed(self, vol: torch.Tensor) -> torch.Tensor:
+        """Run the parallel ViT branches. vol (B, D, H, W) -> slice embeddings (B, 3, k, dim)."""
         b = vol.shape[0]
-        tokens = []
+        out = []
         for p in range(len(PLANES)):
-            s = extract_slices(vol, p, self.k)  # (B, k, 3, h, w)
-            s = s.flatten(0, 1).float()
+            s = extract_slices(vol, p, self.k).flatten(0, 1).float()  # (B*k, 3, h, w)
             if s.shape[-1] != self.img_size:
                 s = F.interpolate(s, size=(self.img_size,) * 2, mode="bilinear",
                                   align_corners=False)
             net = self.backbones[p % len(self.backbones)]
-            emb = net(s).view(b, self.k, -1)
-            tokens.append(emb + self.pos_emb + self.plane_emb[p])
-        x = torch.cat([self.cls.expand(b, -1, -1)] + tokens, dim=1)
-        x = self.norm(self.fusion(x))[:, 0]
-        x = self.drop(x)
+            out.append(net(s).view(b, self.k, -1))
+        return torch.stack(out, dim=1)
+
+    def head(self, emb: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Fuse slice embeddings (B, 3, k, dim) across planes and predict."""
+        b = emb.shape[0]
+        tokens = emb.float() + self.pos_emb[:, None] + self.plane_emb[None]  # (B, 3, k, dim)
+        x = torch.cat([self.cls.expand(b, -1, -1), tokens.flatten(1, 2)], dim=1)
+        x = self.drop(self.norm(self.fusion(x))[:, 0])
         return {"amyloid_logit": self.amyloid_head(x).squeeze(-1),
                 "hazard_logits": self.hazard_head(x)}
+
+    def head_parameters(self):
+        bb = set(map(id, self.backbones.parameters()))
+        return [p for p in self.parameters() if id(p) not in bb]
+
+    def forward(self, vol: torch.Tensor) -> dict[str, torch.Tensor]:
+        """vol: (B, D, H, W) normalized brain volume."""
+        return self.head(self.embed(vol))
 
 
 def time_bin(duration: torch.Tensor, horizon: float, n_bins: int) -> torch.Tensor:

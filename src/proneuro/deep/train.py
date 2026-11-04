@@ -74,15 +74,24 @@ def multitask_loss(out, amy, dur, evt, horizon: float, amy_weight: float = 1.0):
 
 
 @torch.no_grad()
-def predict(model, loader, device, amp: bool) -> tuple[np.ndarray, np.ndarray]:
+def predict(model, loader, device, amp: bool, horizon: float = 60.0,
+            amy_weight: float = 1.0, forward=None) -> tuple[np.ndarray, np.ndarray, float]:
+    """Predictions plus mean loss. `forward` maps a batch input to model outputs;
+    default is model(x). For cached features with several views, outputs are averaged."""
     model.eval()
-    amy, risk = [], []
-    for v, *_ in loader:
+    forward = forward or model
+    amy, risk, losses, n = [], [], 0.0, 0
+    for x, a, d, e in loader:
+        x = x.to(device, non_blocking=True)
         with torch.autocast(device.type, enabled=amp and device.type == "cuda"):
-            out = model(v.to(device, non_blocking=True))
-        amy.append(torch.sigmoid(out["amyloid_logit"].float()).cpu())
-        risk.append(risk_score(out["hazard_logits"].float()).cpu())
-    return torch.cat(amy).numpy(), torch.cat(risk).numpy()
+            out = forward(x)
+        out = {k: v.float() for k, v in out.items()}
+        a, d, e = a.to(device), d.to(device), e.to(device)
+        losses += multitask_loss(out, a, d, e, horizon, amy_weight).item() * len(a)
+        n += len(a)
+        amy.append(torch.sigmoid(out["amyloid_logit"]).cpu())
+        risk.append(risk_score(out["hazard_logits"]).cpu())
+    return torch.cat(amy).numpy(), torch.cat(risk).numpy(), losses / max(n, 1)
 
 
 def score(lab: pd.DataFrame, amy_pred: np.ndarray, risk: np.ndarray) -> dict:
@@ -97,23 +106,132 @@ def score(lab: pd.DataFrame, amy_pred: np.ndarray, risk: np.ndarray) -> dict:
     return res
 
 
-def _val_score(r: dict) -> float:
-    vals = [r[k] for k in ("amyloid_auc", "conversion_cindex") if k in r]
-    return float(np.mean(vals)) if vals else 0.0
+def _fmt(r: dict) -> str:
+    return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in r.items()) + "}"
+
+
+def build_model(cfg: dict, pretrained: bool | None = None) -> TriPlanarViT:
+    m = cfg["model"]
+    return TriPlanarViT(backbone=m["backbone"],
+                        pretrained=m["pretrained"] if pretrained is None else pretrained,
+                        slices_per_plane=m["slices_per_plane"], img_size=m["img_size"],
+                        fusion_layers=m["fusion_layers"], shared_backbone=m["shared_backbone"],
+                        dropout=m["dropout"], time_bins=m["time_bins"],
+                        grad_checkpointing=m.get("grad_checkpointing", False),
+                        **m.get("backbone_kwargs", {}))
+
+
+# ---------------------------------------------------------------- frozen-backbone mode
+
+@torch.no_grad()
+def extract_features(cfg: dict, vol_dir: Path, rids, cache_dir: Path, device: torch.device,
+                     log) -> None:
+    """Run the pretrained ViT branches once per scan and cache slice embeddings.
+
+    Saves <cache_dir>/<RID>.npy with shape (2, 3, k, dim): view 0 = original,
+    view 1 = left-right flipped (used as augmentation and test-time averaging)."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    todo = [r for r in rids if not (cache_dir / f"{int(r)}.npy").exists()]
+    if not todo:
+        log(f"Features cached for all {len(rids)} scans ({cache_dir})")
+        return
+    log(f"Extracting ViT features for {len(todo)} scans -> {cache_dir}")
+    model = build_model(cfg).to(device).eval()
+    amp = cfg["train"]["amp"] and device.type == "cuda"
+    t0 = time.time()
+    for i, rid in enumerate(todo):
+        v = np.load(Path(vol_dir) / f"{int(rid)}.npy").astype(np.float32)
+        x = torch.from_numpy(np.stack([v, np.ascontiguousarray(v[::-1])])).to(device)
+        with torch.autocast(device.type, enabled=amp):
+            emb = model.embed(x).float().cpu().numpy().astype(np.float16)
+        np.save(cache_dir / f"{int(rid)}.npy", emb)
+        if (i + 1) % 50 == 0 or i + 1 == len(todo):
+            log(f"  {i + 1}/{len(todo)} scans ({time.time() - t0:.0f}s)")
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+class FeatureDataset(Dataset):
+    """Cached slice embeddings with labels. Training: a random view; eval: all views."""
+
+    def __init__(self, cache_dir: Path, rids, labels: pd.DataFrame, train: bool = False):
+        self.feats = {r: np.load(Path(cache_dir) / f"{int(r)}.npy") for r in rids}
+        self.rids, self.labels, self.train = list(rids), labels, train
+
+    def __len__(self) -> int:
+        return len(self.rids)
+
+    def __getitem__(self, i):
+        rid = self.rids[i]
+        f = self.feats[rid].astype(np.float32)  # (views, 3, k, dim)
+        if self.train:
+            f = f[np.random.randint(len(f))]
+        row = self.labels.loc[rid]
+        return (torch.from_numpy(f), torch.tensor(row["amyloid"], dtype=torch.float32),
+                torch.tensor(row["duration"], dtype=torch.float32),
+                torch.tensor(row["event"], dtype=torch.float32))
+
+
+def _multi_view_head(model):
+    """Average head outputs over views: x (B, views, 3, k, dim)."""
+    def fwd(x):
+        b, v = x.shape[:2]
+        out = model.head(x.flatten(0, 1))
+        return {k: o.view(b, v, *o.shape[1:]).mean(1) for k, o in out.items()}
+    return fwd
+
+
+def train_frozen_fold(cfg: dict, cache_dir: Path, lab: pd.DataFrame, train_ids, val_ids,
+                      test_ids, device: torch.device, log) -> dict:
+    fz, horizon = cfg["frozen"], cfg["horizon_months"]
+    model = build_model(cfg, pretrained=False).to(device)
+    opt = torch.optim.AdamW(model.head_parameters(), lr=fz["lr"], weight_decay=fz["weight_decay"])
+    tr = DataLoader(FeatureDataset(cache_dir, train_ids, lab, train=True),
+                    batch_size=fz["batch_size"], shuffle=True,
+                    drop_last=len(train_ids) > fz["batch_size"])
+    va = DataLoader(FeatureDataset(cache_dir, val_ids, lab), batch_size=64)
+    te = DataLoader(FeatureDataset(cache_dir, test_ids, lab), batch_size=64)
+    fwd = _multi_view_head(model)
+
+    best, best_state, bad = float("inf"), None, 0
+    for epoch in range(fz["epochs"]):
+        model.train()
+        total, n = 0.0, 0
+        for x, a, d, e in tr:
+            x, a, d, e = (t.to(device) for t in (x, a, d, e))
+            out = model.head(x)
+            loss = multitask_loss(out, a, d, e, horizon, cfg["train"]["amyloid_weight"])
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.head_parameters(), 1.0)
+            opt.step()
+            total, n = total + loss.item(), n + 1
+        pa, pr, vloss = predict(model, va, device, False, horizon,
+                                cfg["train"]["amyloid_weight"], forward=fwd)
+        if vloss < best:
+            best, bad = vloss, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                          if not k.startswith("backbones.")}
+            if (epoch + 1) % 10 == 0 or epoch < 3:
+                log(f"  epoch {epoch + 1:3d}  loss {total / max(n, 1):.4f}  "
+                    f"val_loss {vloss:.4f}  val {_fmt(score(lab.loc[val_ids], pa, pr))}")
+        else:
+            bad += 1
+            if bad >= fz["patience"]:
+                log(f"  early stop at epoch {epoch + 1} (best val_loss {best:.4f})")
+                break
+    if best_state is not None:
+        model.load_state_dict(best_state, strict=False)
+    pa, pr, _ = predict(model, te, device, False, horizon, forward=fwd)
+    return score(lab.loc[test_ids], pa, pr)
 
 
 def train_fold(cfg: dict, vol_dir: Path, lab: pd.DataFrame, train_ids, val_ids, test_ids,
                device: torch.device, log) -> dict:
     t = cfg["train"]
-    m = cfg["model"]
-    model = TriPlanarViT(backbone=m["backbone"], pretrained=m["pretrained"],
-                         slices_per_plane=m["slices_per_plane"], img_size=m["img_size"],
-                         fusion_layers=m["fusion_layers"], shared_backbone=m["shared_backbone"],
-                         dropout=m["dropout"], time_bins=m["time_bins"],
-                         grad_checkpointing=m.get("grad_checkpointing", False),
-                         **m.get("backbone_kwargs", {})).to(device)
-    bb = set(map(id, model.backbone_parameters()))
-    head = [p for p in model.parameters() if id(p) not in bb]
+    model = build_model(cfg).to(device)
+    head = model.head_parameters()
     opt = torch.optim.AdamW([{"params": model.backbone_parameters(), "lr": t["lr_backbone"]},
                              {"params": head, "lr": t["lr_head"]}], weight_decay=t["weight_decay"])
     mk = dict(batch_size=t["batch_size"], num_workers=t["num_workers"],
@@ -131,7 +249,7 @@ def train_fold(cfg: dict, vol_dir: Path, lab: pd.DataFrame, train_ids, val_ids, 
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
     horizon = cfg["horizon_months"]
 
-    best, best_state, bad = -1.0, None, 0
+    best, best_state, bad = float("inf"), None, 0
     for epoch in range(t["epochs"]):
         model.train()
         t0, total, n = time.time(), 0.0, 0
@@ -151,12 +269,12 @@ def train_fold(cfg: dict, vol_dir: Path, lab: pd.DataFrame, train_ids, val_ids, 
                 opt.zero_grad(set_to_none=True)
                 sched.step()
             total, n = total + loss.item() * t["accumulate"], n + 1
-        r = score(lab.loc[val_ids], *predict(model, va, device, amp))
-        vs = _val_score(r)
-        log(f"  epoch {epoch + 1:3d}  loss {total / max(n, 1):.4f}  val {r}  "
-            f"({time.time() - t0:.0f}s)")
-        if vs > best:
-            best, bad = vs, 0
+        pa, pr, vloss = predict(model, va, device, amp, horizon, t["amyloid_weight"])
+        r = score(lab.loc[val_ids], pa, pr)
+        log(f"  epoch {epoch + 1:3d}  loss {total / max(n, 1):.4f}  val_loss {vloss:.4f}  "
+            f"val {_fmt(r)}  ({time.time() - t0:.0f}s)")
+        if vloss < best:
+            best, bad = vloss, 0
             best_state = {k: x.detach().cpu().clone() for k, x in model.state_dict().items()}
         else:
             bad += 1
@@ -165,7 +283,8 @@ def train_fold(cfg: dict, vol_dir: Path, lab: pd.DataFrame, train_ids, val_ids, 
                 break
     if best_state is not None:
         model.load_state_dict(best_state)
-    return score(lab.loc[test_ids], *predict(model, te, device, amp))
+    pa, pr, _ = predict(model, te, device, amp, horizon)
+    return score(lab.loc[test_ids], pa, pr)
 
 
 def ridge_fold(regions: pd.DataFrame, lab: pd.DataFrame, train_ids, test_ids, seed: int) -> dict:
@@ -211,6 +330,14 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
     seed, k = cfg["seed"], cfg["n_splits"]
     torch.manual_seed(seed)
     np.random.seed(seed)
+    frozen = cfg["model"].get("freeze_backbone", False)
+    gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "no GPU"
+    log(f"Device: {device} ({gpu}); mode: {'frozen backbone' if frozen else 'full fine-tuning'}")
+    if frozen:
+        m = cfg["model"]
+        tag = f"{m['backbone']}_k{m['slices_per_plane']}_s{m['img_size']}"
+        cache_dir = Path(cfg["data"].get("feature_dir", "data/processed/vit_features")) / tag
+        extract_features(cfg, vol_dir, ids, cache_dir, device, log)
     results = []
     skf = StratifiedKFold(k, shuffle=True, random_state=seed)
     for f, (tr_i, te_i) in enumerate(skf.split(ids, lab["dx"])):
@@ -220,7 +347,10 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
         tr_ids, va_ids = train_test_split(tr_ids, test_size=cfg["train"]["val_fraction"],
                                           random_state=seed, stratify=lab.loc[tr_ids, "dx"])
         log(f"Fold {f + 1}/{k}: train {len(tr_ids)}, val {len(va_ids)}, test {len(te_ids)}")
-        vit = train_fold(cfg, vol_dir, lab, tr_ids, va_ids, te_ids, device, log)
+        if frozen:
+            vit = train_frozen_fold(cfg, cache_dir, lab, tr_ids, va_ids, te_ids, device, log)
+        else:
+            vit = train_fold(cfg, vol_dir, lab, tr_ids, va_ids, te_ids, device, log)
         ridge = ridge_fold(regions, lab, np.concatenate([tr_ids, va_ids]), te_ids, seed)
         log(f"Fold {f + 1} test  ViT {vit}  |  FreeSurfer ridge {ridge}")
         results.append({"fold": f + 1, "vit": vit, "ridge": ridge})
@@ -234,7 +364,8 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
                 out[metric] = {"mean": round(float(np.mean(v)), 3), "sd": round(float(np.std(v)), 3)}
         return out
 
-    summary = {"n_participants": int(len(ids)), "folds_run": len(results),
+    summary = {"mode": "frozen" if frozen else "finetune",
+               "n_participants": int(len(ids)), "folds_run": len(results),
                "tri_planar_vit": summ("vit"), "freesurfer_ridge_same_folds": summ("ridge")}
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     log(json.dumps(summary, indent=2))
