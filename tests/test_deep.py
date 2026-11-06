@@ -104,3 +104,42 @@ def test_cross_validate_frozen(tmp_path: Path):
     assert "amyloid_auc" in summary["tri_planar_vit"]
     feats = list((tmp_path / "feats").rglob("*.npy"))
     assert len(feats) == 40 and np.load(feats[0]).shape == (2, 3, 4, 192)
+
+
+def test_mtl_crops():
+    from proneuro.deep.volumes import mtl_crops
+
+    rng = np.random.default_rng(0)
+    img = rng.normal(100, 10, (80, 80, 80)).astype(np.float32)
+    mask = np.zeros_like(img, dtype=bool)
+    mask[5:75, 5:75, 5:75] = True
+    seg = np.zeros(img.shape, np.int32)
+    seg[20:30, 35:45, 35:45] = 17   # left hippocampus
+    seg[50:60, 35:45, 35:45] = 53   # right hippocampus
+    seg[2:4, 2:4, 2:4] = 53         # stray voxels near the border: centroid still valid
+    crops = mtl_crops(img, mask, seg, size=32)
+    assert crops.shape == (2, 32, 32, 32) and crops.dtype == np.float16
+    with pytest.raises(ValueError):
+        mtl_crops(img, mask, np.zeros_like(seg), size=32)
+
+
+def test_two_region_model():
+    model = TriPlanarViT(**TINY, regions=2)
+    emb = model.embed(torch.randn(2, 2, 32, 32, 32))
+    assert emb.shape == (2, 6, 4, 192)
+    out = model.head(emb)
+    assert out["amyloid_logit"].shape == (2,) and out["hazard_logits"].shape == (2, 5)
+
+
+def test_cross_validate_frozen_two_regions(tmp_path: Path):
+    from proneuro.deep.train import cross_validate
+
+    cfg, d, vol_dir = _synthetic(tmp_path)
+    for p in vol_dir.glob("*.npy"):  # turn each volume into 2 regions
+        v = np.load(p)
+        np.save(p, np.stack([v, v[::-1]]))
+    cfg["model"].update(freeze_backbone=True, regions=2)
+    summary = cross_validate(cfg, d, vol_dir, tmp_path / "out", torch.device("cpu"), folds=[1])
+    assert summary["folds_run"] == 1 and "amyloid_auc" in summary["tri_planar_vit"]
+    feats = list((tmp_path / "feats").rglob("*.npy"))
+    assert np.load(feats[0]).shape == (2, 6, 4, 192)

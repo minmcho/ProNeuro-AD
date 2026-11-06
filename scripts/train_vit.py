@@ -2,12 +2,14 @@
 
     python scripts/train_vit.py --config configs/vit.yaml
     python scripts/train_vit.py --config configs/vit.yaml --folds 1      # quick: one fold only
+    python scripts/train_vit.py --config configs/vit_mtl.yaml            # hippocampus crops
 
 Prints and saves (outputs/vit/) per-fold and summary results, next to a FreeSurfer
 ridge baseline trained on exactly the same folds.
 """
 
 import argparse
+import warnings
 from pathlib import Path
 
 import torch
@@ -15,6 +17,9 @@ import torch
 from proneuro.config import load_config
 from proneuro.data.adsp import build_dataset
 from proneuro.deep.train import cross_validate
+
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
 
 def main() -> None:

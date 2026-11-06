@@ -1,8 +1,10 @@
-"""Convert FastSurfer outputs into normalized brain volumes for deep learning.
+"""Convert FastSurfer outputs into normalized inputs for deep learning.
 
-    python scripts/prepare_volumes.py --fastsurfer-dir outputs/fastsurfer
+    python scripts/prepare_volumes.py                 # whole brain -> data/processed/volumes
+    python scripts/prepare_volumes.py --type mtl      # hippocampus crops -> data/processed/mtl
 
-Writes data/processed/volumes/<RID>.npy (float16, 128^3 by default, ~4 MB each).
+brain: <RID>.npy float16 (128,128,128), skull-stripped whole brain
+mtl:   <RID>.npy float16 (2,64,64,64), 64 mm cube around each hippocampus
 """
 
 import argparse
@@ -10,15 +12,18 @@ from pathlib import Path
 
 import numpy as np
 
-from proneuro.deep.volumes import load_subject, preprocess
+from proneuro.deep.volumes import load_seg, load_subject, mtl_crops, preprocess
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--fastsurfer-dir", default="outputs/fastsurfer")
-    p.add_argument("--out", default="data/processed/volumes")
-    p.add_argument("--size", type=int, default=128)
+    p.add_argument("--type", choices=["brain", "mtl"], default="brain")
+    p.add_argument("--out", default=None, help="default: data/processed/volumes or .../mtl")
+    p.add_argument("--size", type=int, default=None, help="default: 128 (brain) or 64 (mtl)")
     args = p.parse_args()
+    args.out = args.out or ("data/processed/mtl" if args.type == "mtl" else "data/processed/volumes")
+    args.size = args.size or (64 if args.type == "mtl" else 128)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -30,7 +35,10 @@ def main() -> None:
             skipped += 1
             continue
         try:
-            np.save(dest, preprocess(*load_subject(d), size=args.size))
+            if args.type == "mtl":
+                np.save(dest, mtl_crops(*load_subject(d), load_seg(d), size=args.size))
+            else:
+                np.save(dest, preprocess(*load_subject(d), size=args.size))
             ok += 1
         except Exception as e:
             failed += 1

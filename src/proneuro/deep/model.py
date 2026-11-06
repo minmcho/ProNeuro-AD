@@ -46,9 +46,9 @@ class TriPlanarViT(nn.Module):
     def __init__(self, backbone: str = "vit_small_patch16_224", pretrained: bool = True,
                  slices_per_plane: int = 8, img_size: int = 224, fusion_layers: int = 2,
                  shared_backbone: bool = False, dropout: float = 0.1, time_bins: int = 5,
-                 grad_checkpointing: bool = False, **backbone_kw):
+                 grad_checkpointing: bool = False, regions: int = 1, **backbone_kw):
         super().__init__()
-        self.k, self.img_size = slices_per_plane, img_size
+        self.k, self.img_size, self.regions = slices_per_plane, img_size, regions
         n = 1 if shared_backbone else len(PLANES)
         self.backbones = nn.ModuleList(
             make_backbone(backbone, pretrained, img_size, **backbone_kw) for _ in range(n))
@@ -58,9 +58,11 @@ class TriPlanarViT(nn.Module):
         dim = self.backbones[0].num_features
         self.plane_emb = nn.Parameter(torch.zeros(len(PLANES), 1, dim))
         self.pos_emb = nn.Parameter(torch.zeros(1, slices_per_plane, dim))
+        self.region_emb = nn.Parameter(torch.zeros(regions, 1, 1, dim))
         self.cls = nn.Parameter(torch.zeros(1, 1, dim))
         nn.init.trunc_normal_(self.plane_emb, std=0.02)
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
+        nn.init.trunc_normal_(self.region_emb, std=0.02)
         layer = nn.TransformerEncoderLayer(dim, nhead=max(1, dim // 64), dim_feedforward=dim * 2,
                                            dropout=dropout, batch_first=True, norm_first=True)
         self.fusion = nn.TransformerEncoder(layer, fusion_layers, enable_nested_tensor=False)
@@ -77,7 +79,14 @@ class TriPlanarViT(nn.Module):
         return self.plane_emb.shape[-1]
 
     def embed(self, vol: torch.Tensor) -> torch.Tensor:
-        """Run the parallel ViT branches. vol (B, D, H, W) -> slice embeddings (B, 3, k, dim)."""
+        """Run the parallel ViT branches.
+
+        vol (B, D, H, W), or (B, R, D, H, W) for R regions (e.g. left/right hippocampus)
+        -> slice embeddings (B, R*3, k, dim)."""
+        if vol.ndim == 5:
+            b, r = vol.shape[:2]
+            emb = self.embed(vol.flatten(0, 1))  # (B*R, 3, k, dim)
+            return emb.view(b, r * len(PLANES), self.k, -1)
         b = vol.shape[0]
         out = []
         for p in range(len(PLANES)):
@@ -90,9 +99,12 @@ class TriPlanarViT(nn.Module):
         return torch.stack(out, dim=1)
 
     def head(self, emb: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Fuse slice embeddings (B, 3, k, dim) across planes and predict."""
-        b = emb.shape[0]
-        tokens = emb.float() + self.pos_emb[:, None] + self.plane_emb[None]  # (B, 3, k, dim)
+        """Fuse slice embeddings (B, R*3, k, dim) across planes and regions, and predict."""
+        b, rp = emb.shape[:2]
+        r = rp // len(PLANES)
+        plane = self.plane_emb.repeat(r, 1, 1)                              # (R*3, 1, dim)
+        region = self.region_emb[:r].repeat_interleave(len(PLANES), 0)[:, 0]  # (R*3, 1, dim)
+        tokens = emb.float() + self.pos_emb[:, None] + (plane + region)[None]
         x = torch.cat([self.cls.expand(b, -1, -1), tokens.flatten(1, 2)], dim=1)
         x = self.drop(self.norm(self.fusion(x))[:, 0])
         return {"amyloid_logit": self.amyloid_head(x).squeeze(-1),

@@ -35,9 +35,9 @@ class VolumeDataset(Dataset):
     def _augment(self, v: np.ndarray) -> np.ndarray:
         rng = np.random.default_rng()
         if rng.random() < 0.5:
-            v = v[::-1]  # left-right flip (axis 0 in FreeSurfer's conformed orientation)
+            v = np.flip(v, axis=-3)  # left-right (axis 0 of each volume, FreeSurfer LIA)
         shift = rng.integers(-4, 5, size=3)
-        v = np.roll(v, shift, axis=(0, 1, 2))
+        v = np.roll(v, shift, axis=(-3, -2, -1))
         v = v * rng.uniform(0.9, 1.1) + rng.uniform(-0.1, 0.1)
         return v
 
@@ -118,7 +118,7 @@ def build_model(cfg: dict, pretrained: bool | None = None) -> TriPlanarViT:
                         fusion_layers=m["fusion_layers"], shared_backbone=m["shared_backbone"],
                         dropout=m["dropout"], time_bins=m["time_bins"],
                         grad_checkpointing=m.get("grad_checkpointing", False),
-                        **m.get("backbone_kwargs", {}))
+                        regions=m.get("regions", 1), **m.get("backbone_kwargs", {}))
 
 
 # ---------------------------------------------------------------- frozen-backbone mode
@@ -128,7 +128,7 @@ def extract_features(cfg: dict, vol_dir: Path, rids, cache_dir: Path, device: to
                      log) -> None:
     """Run the pretrained ViT branches once per scan and cache slice embeddings.
 
-    Saves <cache_dir>/<RID>.npy with shape (2, 3, k, dim): view 0 = original,
+    Saves <cache_dir>/<RID>.npy with shape (2, R*3, k, dim): view 0 = original,
     view 1 = left-right flipped (used as augmentation and test-time averaging)."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     todo = [r for r in rids if not (cache_dir / f"{int(r)}.npy").exists()]
@@ -141,7 +141,8 @@ def extract_features(cfg: dict, vol_dir: Path, rids, cache_dir: Path, device: to
     t0 = time.time()
     for i, rid in enumerate(todo):
         v = np.load(Path(vol_dir) / f"{int(rid)}.npy").astype(np.float32)
-        x = torch.from_numpy(np.stack([v, np.ascontiguousarray(v[::-1])])).to(device)
+        flipped = np.ascontiguousarray(np.flip(v, axis=-3))
+        x = torch.from_numpy(np.stack([v, flipped])).to(device)
         with torch.autocast(device.type, enabled=amp):
             emb = model.embed(x).float().cpu().numpy().astype(np.float16)
         np.save(cache_dir / f"{int(rid)}.npy", emb)
@@ -335,7 +336,8 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
     log(f"Device: {device} ({gpu}); mode: {'frozen backbone' if frozen else 'full fine-tuning'}")
     if frozen:
         m = cfg["model"]
-        tag = f"{m['backbone']}_k{m['slices_per_plane']}_s{m['img_size']}"
+        tag = (f"{Path(vol_dir).name}_{m['backbone']}_k{m['slices_per_plane']}"
+               f"_s{m['img_size']}")
         cache_dir = Path(cfg["data"].get("feature_dir", "data/processed/vit_features")) / tag
         extract_features(cfg, vol_dir, ids, cache_dir, device, log)
     results = []

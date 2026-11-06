@@ -11,6 +11,8 @@ import numpy as np
 
 IMAGE_CANDIDATES = ["mri/orig_nu.mgz", "mri/orig.mgz"]
 MASK_CANDIDATES = ["mri/mask.mgz", "mri/aparc.DKTatlas+aseg.deep.mgz"]
+SEG_FILE = "mri/aparc.DKTatlas+aseg.deep.mgz"
+LEFT_HIPPOCAMPUS, RIGHT_HIPPOCAMPUS = 17, 53  # FreeSurfer aseg labels
 
 
 def _first(subject_dir: Path, names: list[str]) -> Path | None:
@@ -28,6 +30,45 @@ def load_subject(subject_dir: str | Path) -> tuple[np.ndarray, np.ndarray]:
     img = np.asarray(nib.load(str(img_p)).dataobj, dtype=np.float32)
     mask = np.asarray(nib.load(str(mask_p)).dataobj) > 0
     return img, mask
+
+
+def load_seg(subject_dir: str | Path) -> np.ndarray:
+    import nibabel as nib
+
+    p = Path(subject_dir) / SEG_FILE
+    if not p.exists():
+        raise FileNotFoundError(f"FastSurfer segmentation missing: {p}")
+    return np.asarray(nib.load(str(p)).dataobj).astype(np.int32)
+
+
+def _crop_at(vol: np.ndarray, center: np.ndarray, size: int) -> np.ndarray:
+    """size^3 crop centred on `center`, zero-padded at the image border."""
+    half = size // 2
+    pad = np.pad(vol, half)
+    c = np.asarray(center) + half
+    return pad[c[0] - half:c[0] - half + size, c[1] - half:c[1] - half + size,
+               c[2] - half:c[2] - half + size]
+
+
+def mtl_crops(img: np.ndarray, mask: np.ndarray, seg: np.ndarray, size: int = 64) -> np.ndarray:
+    """Medial temporal lobe crops: a size^3 (1 mm) cube around each hippocampus.
+
+    Intensities are z-scored over the whole brain first (so atrophy shows as lower
+    tissue / more CSF), zero outside the brain. The right-hemisphere crop is mirrored
+    left-right (axis 0 in FreeSurfer's conformed LIA orientation) so both look alike.
+    Returns float16 (2, size, size, size): [left, mirrored right]."""
+    if not mask.any():
+        raise ValueError("empty brain mask")
+    vals = img[mask]
+    z = np.where(mask, (img - vals.mean()) / (vals.std() + 1e-6), 0).astype(np.float32)
+    crops = []
+    for label in (LEFT_HIPPOCAMPUS, RIGHT_HIPPOCAMPUS):
+        idx = np.argwhere(seg == label)
+        if len(idx) < 100:
+            raise ValueError(f"hippocampus label {label} missing or too small ({len(idx)} voxels)")
+        crop = _crop_at(z, idx.mean(0).round().astype(int), size)
+        crops.append(crop[::-1] if label == RIGHT_HIPPOCAMPUS else crop)
+    return np.ascontiguousarray(np.stack(crops)).astype(np.float16)
 
 
 def resize_cube(vol: np.ndarray, size: int) -> np.ndarray:
