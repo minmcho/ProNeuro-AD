@@ -34,6 +34,9 @@ frozen:                             # used when model.freeze_backbone is true
   lr: 3.0e-4
   weight_decay: 0.05
 
+combined:                           # frozen mode: also fit ridge on FreeSurfer + ViT features
+  pca_components: 32                # ViT features compressed per training fold
+
 train:                              # full fine-tuning (model.freeze_backbone: false)
   epochs: 30
   patience: 6                       # early stopping on validation loss

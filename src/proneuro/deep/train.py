@@ -288,6 +288,37 @@ def train_fold(cfg: dict, vol_dir: Path, lab: pd.DataFrame, train_ids, val_ids, 
     return score(lab.loc[test_ids], pa, pr)
 
 
+def pooled_features(cache_dir: Path, rids) -> pd.DataFrame:
+    """One vector per scan from cached ViT features: mean over views and slices,
+    keeping each plane/region separate -> (R*3*dim) numbers."""
+    rows = {}
+    for r in rids:
+        f = np.load(Path(cache_dir) / f"{int(r)}.npy").astype(np.float32)  # (views, R*3, k, dim)
+        rows[r] = f.mean(axis=(0, 2)).ravel()
+    return pd.DataFrame.from_dict(rows, orient="index")
+
+
+def _pca_block(feats: pd.DataFrame, train_ids, n: int, prefix: str = "vit_pc") -> pd.DataFrame:
+    """PCA fitted on the training fold only (no test information leaks in)."""
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    sc = StandardScaler().fit(feats.loc[train_ids])
+    n = min(n, len(train_ids) - 1, feats.shape[1])
+    pca = PCA(n_components=n, random_state=0).fit(sc.transform(feats.loc[train_ids]))
+    z = pca.transform(sc.transform(feats))
+    return pd.DataFrame(z, index=feats.index, columns=[f"{prefix}{i}" for i in range(n)])
+
+
+def combined_folds(regions: pd.DataFrame, feats: pd.DataFrame, lab: pd.DataFrame, train_ids,
+                   test_ids, seed: int, n_pca: int) -> dict:
+    """Ridge on ViT features alone, and on FreeSurfer + ViT features together."""
+    vit = _pca_block(feats, train_ids, n_pca)
+    return {"vit_features_ridge": ridge_fold(vit, lab, train_ids, test_ids, seed),
+            "freesurfer_plus_vit_ridge": ridge_fold(regions.join(vit), lab, train_ids,
+                                                    test_ids, seed)}
+
+
 def ridge_fold(regions: pd.DataFrame, lab: pd.DataFrame, train_ids, test_ids, seed: int) -> dict:
     """FreeSurfer all-regions ridge baseline on exactly the same fold."""
     res = {}
@@ -340,6 +371,7 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
                f"_s{m['img_size']}")
         cache_dir = Path(cfg["data"].get("feature_dir", "data/processed/vit_features")) / tag
         extract_features(cfg, vol_dir, ids, cache_dir, device, log)
+        pooled = pooled_features(cache_dir, ids)
     results = []
     skf = StratifiedKFold(k, shuffle=True, random_state=seed)
     for f, (tr_i, te_i) in enumerate(skf.split(ids, lab["dx"])):
@@ -353,9 +385,17 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
             vit = train_frozen_fold(cfg, cache_dir, lab, tr_ids, va_ids, te_ids, device, log)
         else:
             vit = train_fold(cfg, vol_dir, lab, tr_ids, va_ids, te_ids, device, log)
-        ridge = ridge_fold(regions, lab, np.concatenate([tr_ids, va_ids]), te_ids, seed)
-        log(f"Fold {f + 1} test  ViT {vit}  |  FreeSurfer ridge {ridge}")
-        results.append({"fold": f + 1, "vit": vit, "ridge": ridge})
+        fit_ids = np.concatenate([tr_ids, va_ids])
+        ridge = ridge_fold(regions, lab, fit_ids, te_ids, seed)
+        row = {"fold": f + 1, "vit": vit, "ridge": ridge}
+        if frozen:
+            row.update(combined_folds(regions, pooled, lab, fit_ids, te_ids, seed,
+                                      cfg.get("combined", {}).get("pca_components", 32)))
+        log(f"Fold {f + 1} test  ViT {_fmt(vit)}  |  FreeSurfer ridge {_fmt(ridge)}")
+        if frozen:
+            log(f"             ViT-features ridge {_fmt(row['vit_features_ridge'])}  |  "
+                f"FreeSurfer + ViT ridge {_fmt(row['freesurfer_plus_vit_ridge'])}")
+        results.append(row)
         (out_dir / "folds.json").write_text(json.dumps(results, indent=2))
 
     def summ(key: str) -> dict:
@@ -369,6 +409,9 @@ def cross_validate(cfg: dict, d: dict, vol_dir: Path, out_dir: Path, device: tor
     summary = {"mode": "frozen" if frozen else "finetune",
                "n_participants": int(len(ids)), "folds_run": len(results),
                "tri_planar_vit": summ("vit"), "freesurfer_ridge_same_folds": summ("ridge")}
+    if frozen:
+        summary["vit_features_ridge"] = summ("vit_features_ridge")
+        summary["freesurfer_plus_vit_ridge"] = summ("freesurfer_plus_vit_ridge")
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     log(json.dumps(summary, indent=2))
     log_f.close()

@@ -102,6 +102,8 @@ def test_cross_validate_frozen(tmp_path: Path):
     summary = cross_validate(cfg, d, vol_dir, tmp_path / "out", torch.device("cpu"), folds=[1])
     assert summary["mode"] == "frozen" and summary["folds_run"] == 1
     assert "amyloid_auc" in summary["tri_planar_vit"]
+    assert "amyloid_auc" in summary["freesurfer_plus_vit_ridge"]
+    assert "conversion_cindex" in summary["vit_features_ridge"]
     feats = list((tmp_path / "feats").rglob("*.npy"))
     assert len(feats) == 40 and np.load(feats[0]).shape == (2, 3, 4, 192)
 
