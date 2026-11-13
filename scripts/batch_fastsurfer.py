@@ -8,6 +8,7 @@ DICOM folders are converted to NIfTI first. Output: outputs/fastsurfer/<RID>/
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -70,6 +71,29 @@ def docker_running() -> bool:
         return False
 
 
+def run_one(rid: str, image_dir: Path, image_id, args, out: Path) -> tuple[bool, float, str]:
+    """Convert + segment one scan. Returns (ok, seconds, error message)."""
+    t0 = time.time()
+    try:
+        # A scan interrupted mid-run leaves a partial folder that FastSurfer refuses
+        # to reuse; it holds nothing useful, so start that subject fresh.
+        subj = out / rid
+        if subj.exists() and not (subj / "mri" / "aparc.DKTatlas+aseg.deep.mgz").exists():
+            shutil.rmtree(subj, ignore_errors=True)
+        nii = to_nifti(image_dir, Path(args.nifti_dir))
+        cmd = fastsurfer_command(nii, rid, out, image=args.image, threads=args.threads,
+                                 use_gpu=not args.cpu)
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+        if r.returncode != 0:
+            lines = (r.stdout + "\n" + r.stderr).strip().splitlines()
+            tail = "\n    ".join(lines[-15:]) or "(no output)"
+            raise RuntimeError(f"FastSurfer exit code {r.returncode}. Last output:\n    {tail}"
+                               f"\n  Command: {' '.join(cmd)}")
+        return True, time.time() - t0, ""
+    except Exception as e:  # keep going; report the failure
+        return False, time.time() - t0, f"{type(e).__name__}: {e}"
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--download-dir", required=True)
@@ -78,6 +102,9 @@ def main() -> None:
     p.add_argument("--nifti-dir", default="data/processed/nifti")
     p.add_argument("--image", default=DEFAULT_IMAGE)
     p.add_argument("--limit", type=int, default=0, help="process at most N scans (0 = all)")
+    p.add_argument("--workers", type=int, default=1,
+                   help="scans processed in parallel (2-3 on a 12 GB GPU; watch nvidia-smi)")
+    p.add_argument("--threads", type=int, default=4, help="CPU threads per FastSurfer run")
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
@@ -86,36 +113,40 @@ def main() -> None:
                  "then run this again.")
     sel = pd.read_csv(args.selection)
     dirs = find_image_dirs(Path(args.download_dir))
-    todo = sel[sel["image_id"].isin(dirs)]
-    print(f"{len(dirs)} image folders found; {len(todo)} of {len(sel)} selected scans present")
-
+    present = sel[sel["image_id"].isin(dirs)]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    todo = [(str(int(r["RID"])), dirs[int(r["image_id"])], r["image_id"])
+            for _, r in present.iterrows()
+            if not (out / str(int(r["RID"])) / "mri" / "aparc.DKTatlas+aseg.deep.mgz").exists()]
+    if args.limit:
+        todo = todo[:args.limit]
+    print(f"{len(dirs)} image folders found; {len(present)} of {len(sel)} selected scans present; "
+          f"{len(present) - len(todo) if not args.limit else 'some'} already done; "
+          f"{len(todo)} to process with {args.workers} worker(s) x {args.threads} threads",
+          flush=True)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     done = failed = 0
-    for _, row in todo.iterrows():
-        if args.limit and done + failed >= args.limit:
-            break
-        rid = str(int(row["RID"]))
-        if (out / rid / "mri" / "aparc.DKTatlas+aseg.deep.mgz").exists():
-            continue
-        t0 = time.time()
-        try:
-            nii = to_nifti(dirs[int(row["image_id"])], Path(args.nifti_dir))
-            cmd = fastsurfer_command(nii, rid, out, image=args.image, use_gpu=not args.cpu)
-            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
-            if r.returncode != 0:
-                lines = (r.stdout + "\n" + r.stderr).strip().splitlines()
-                tail = "\n    ".join(lines[-15:]) or "(no output)"
-                raise RuntimeError(f"FastSurfer exit code {r.returncode}. Last output:\n    {tail}"
-                                   f"\n  Command: {' '.join(cmd)}")
-            done += 1
-            print(f"[{done + failed}/{len(todo)}] RID {rid} ok ({time.time() - t0:.0f}s)")
-        except Exception as e:  # keep going; log the failure
-            failed += 1
-            msg = f"{type(e).__name__}: {e}"
-            print(f"[{done + failed}/{len(todo)}] RID {rid} FAILED: {msg}", file=sys.stderr)
-            with open(out / "failures.txt", "a", encoding="utf-8") as f:
-                f.write(f"{rid}\t{row['image_id']}\t{msg[:2000]}\n")
+    t_start = time.time()
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        futures = {pool.submit(run_one, rid, d, iid, args, out): (rid, iid) for rid, d, iid in todo}
+        for fut in as_completed(futures):
+            rid, iid = futures[fut]
+            ok, secs, msg = fut.result()
+            n = done + failed + 1
+            if ok:
+                done += 1
+            else:
+                failed += 1
+                with open(out / "failures.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{rid}\t{iid}\t{msg[:2000]}\n")
+            rate = (time.time() - t_start) / n
+            eta_h = rate * (len(todo) - n) / 3600
+            status = f"ok ({secs:.0f}s)" if ok else f"FAILED: {msg}"
+            print(f"[{n}/{len(todo)}] RID {rid} {status}   ~{eta_h:.1f} h left", flush=True,
+                  file=sys.stdout if ok else sys.stderr)
     print(f"Done: {done} processed, {failed} failed")
 
 
